@@ -1,9 +1,19 @@
 /**
  * Carrega configuração a partir de variáveis de ambiente (.env em dev, secrets em prod).
- * Espelha o padrão do conector do Interact (transporte stdio/http + chave do conector).
  */
 import dotenv from "dotenv";
 dotenv.config();
+
+export interface OAuthConfig {
+  enabled: boolean;
+  publicUrl: string; // ex.: https://protheus-mcp.seudominio.com.br (sem barra no fim)
+  entraTenantId: string;
+  entraClientId: string;
+  entraClientSecret: string;
+  allowedEmails: string[]; // e-mails específicos permitidos (minúsculos)
+  allowedDomains: string[]; // domínios permitidos, ex.: dfl.com.br
+  jwtSecret: string; // segredo para assinar os tokens emitidos pelo nosso conector
+}
 
 export interface AppConfig {
   transport: "stdio" | "http";
@@ -19,6 +29,14 @@ export interface AppConfig {
     path: string;
     connectorApiKey?: string;
   };
+  oauth: OAuthConfig;
+}
+
+function csv(v: string | undefined): string[] {
+  return (v ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 export function loadConfig(): AppConfig {
@@ -31,6 +49,33 @@ export function loadConfig(): AppConfig {
       "[protheus-mcp] Faltam variáveis obrigatórias: PROTHEUS_BASE_URL, PROTHEUS_USER, PROTHEUS_PASSWORD."
     );
     process.exit(1);
+  }
+
+  const oauthEnabled = (process.env.AUTH_MODE ?? "none").toLowerCase() === "oauth";
+  const oauth: OAuthConfig = {
+    enabled: oauthEnabled,
+    publicUrl: (process.env.PUBLIC_URL ?? "").replace(/\/+$/, ""),
+    entraTenantId: process.env.ENTRA_TENANT_ID ?? "",
+    entraClientId: process.env.ENTRA_CLIENT_ID ?? "",
+    entraClientSecret: process.env.ENTRA_CLIENT_SECRET ?? "",
+    allowedEmails: csv(process.env.OAUTH_ALLOWED_EMAILS),
+    allowedDomains: csv(process.env.OAUTH_ALLOWED_DOMAINS),
+    jwtSecret: process.env.OAUTH_JWT_SECRET ?? "",
+  };
+
+  if (oauthEnabled) {
+    const missing: string[] = [];
+    if (!oauth.publicUrl) missing.push("PUBLIC_URL");
+    if (!oauth.entraTenantId) missing.push("ENTRA_TENANT_ID");
+    if (!oauth.entraClientId) missing.push("ENTRA_CLIENT_ID");
+    if (!oauth.entraClientSecret) missing.push("ENTRA_CLIENT_SECRET");
+    if (!oauth.jwtSecret) missing.push("OAUTH_JWT_SECRET");
+    if (oauth.allowedEmails.length === 0 && oauth.allowedDomains.length === 0)
+      missing.push("OAUTH_ALLOWED_EMAILS ou OAUTH_ALLOWED_DOMAINS");
+    if (missing.length) {
+      console.error(`[protheus-mcp] AUTH_MODE=oauth exige: ${missing.join(", ")}.`);
+      process.exit(1);
+    }
   }
 
   return {
@@ -47,5 +92,6 @@ export function loadConfig(): AppConfig {
       path: process.env.HTTP_PATH ?? "/mcp",
       connectorApiKey: process.env.CONNECTOR_API_KEY || undefined,
     },
+    oauth,
   };
 }

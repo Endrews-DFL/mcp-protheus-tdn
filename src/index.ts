@@ -23,28 +23,38 @@ async function startHttp(): Promise<void> {
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: true })); // /token usa x-www-form-urlencoded
 
-  // Healthcheck (não exige o segredo do conector).
+  // Healthcheck (sempre aberto).
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", tools: toolCount });
+    res.json({ status: "ok", tools: toolCount, auth: config.oauth.enabled ? "oauth" : config.http.connectorApiKey ? "api-key" : "none" });
   });
 
-  // Autenticação do CONECTOR (diferente das credenciais do Protheus).
-  const expectedKey = config.http.connectorApiKey;
-  app.use(config.http.path, (req, res, next) => {
-    if (!expectedKey) return next(); // sem segredo: acesso liberado (NÃO recomendado)
-    const auth = req.header("authorization");
-    const bearer = auth?.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : undefined;
-    const provided = bearer || req.header("x-connector-key");
-    if (provided !== expectedKey) {
-      return res.status(401).json({
-        jsonrpc: "2.0",
-        error: { code: -32001, message: "Não autorizado: segredo do conector inválido." },
-        id: null,
-      });
-    }
-    next();
-  });
+  if (config.oauth.enabled) {
+    // --- Modo OAuth (login Microsoft/Entra + allowlist) ---
+    const { makeOAuth } = await import("./oauth.js");
+    const oauth = makeOAuth(config.oauth);
+    oauth.mount(app, config.http.path); // discovery, /register, /authorize, /callback, /token
+    app.use(config.http.path, oauth.authMiddleware());
+    console.error("[protheus-mcp] Auth: OAuth (Entra) ATIVO");
+  } else {
+    // --- Modo chave estática (ou aberto) ---
+    const expectedKey = config.http.connectorApiKey;
+    app.use(config.http.path, (req, res, next) => {
+      if (!expectedKey) return next(); // sem segredo: acesso liberado (NÃO recomendado)
+      const auth = req.header("authorization");
+      const bearer = auth?.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : undefined;
+      const provided = bearer || req.header("x-connector-key");
+      if (provided !== expectedKey) {
+        return res.status(401).json({
+          jsonrpc: "2.0",
+          error: { code: -32001, message: "Não autorizado: segredo do conector inválido." },
+          id: null,
+        });
+      }
+      next();
+    });
+  }
 
   // Modo stateless: um server + transporte por requisição.
   app.post(config.http.path, async (req, res) => {
@@ -69,11 +79,10 @@ async function startHttp(): Promise<void> {
     }
   });
 
+  const authMode = config.oauth.enabled ? "oauth" : config.http.connectorApiKey ? "api-key" : "aberto";
   app.listen(config.http.port, () => {
     console.error(
-      `[protheus-mcp] HTTP ouvindo em :${config.http.port}${config.http.path} | ${toolCount} tools | auth do conector: ${
-        expectedKey ? "ATIVA" : "DESATIVADA"
-      }`
+      `[protheus-mcp] HTTP ouvindo em :${config.http.port}${config.http.path} | ${toolCount} tools | auth: ${authMode}`
     );
   });
 }

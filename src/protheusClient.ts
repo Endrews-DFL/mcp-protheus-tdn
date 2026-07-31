@@ -75,7 +75,8 @@ export class ProtheusClient {
       try {
         res = await fetch(url, { method: "POST", headers: { Accept: "application/json" } });
       } catch (e: any) {
-        lastErr = `conexão: ${e?.message ?? e}`;
+        const cause = e?.cause?.code || e?.cause?.message || "";
+        lastErr = `conexão: ${e?.message ?? e}${cause ? ` (${cause})` : ""}`;
         if (attempt < maxAttempts) await delay(400 * attempt);
         continue;
       }
