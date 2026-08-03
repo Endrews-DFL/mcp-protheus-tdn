@@ -190,6 +190,12 @@ export class ProtheusClient {
       if (parsed === undefined && /localizad|cadastrad|não|nao/i.test(body)) {
         return { ok: true, kind: "empty", message: friendlyEmpty(body) };
       }
+      // WSR customizados: mensagens de vazio, ex.: {"RETORNO":"Nenhum registro foi encontrado."}
+      // ou {"Aviso":{"Mensagem":"Não há registros..."}}
+      const flat = JSON.stringify(parsed ?? body ?? "");
+      if (flat.length < 400 && /nenhum registro|n[ãa]o h[áa] |sem registro|n[ãa]o localiz|n[ãa]o cadastr/i.test(flat)) {
+        return { ok: true, kind: "empty", message: "Nenhum registro encontrado para os filtros informados." };
+      }
       // formato custom U_JSON { "CLIENTES": {...} } ou objeto único
       return { ok: true, kind: "data", data: parsed ?? body };
     }

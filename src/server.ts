@@ -1,7 +1,7 @@
 /**
- * Fábrica do servidor MCP: cria a instância e registra as 10 tools de consulta.
- * O ProtheusClient é um singleton de módulo (cache de token compartilhado entre requests,
- * mesmo no modo HTTP stateless, onde createMcpServer() é chamado por requisição).
+ * Fábrica do servidor MCP: registra as tools de consulta.
+ * Piloto atual: usa EXCLUSIVAMENTE web services customizados da DFL (WSR*), sempre GET.
+ * O ProtheusClient é singleton de módulo (cache de token compartilhado, mesmo no HTTP stateless).
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -13,7 +13,6 @@ const client = new ProtheusClient(cfg.protheus);
 
 export const toolCount = 10;
 
-/** Converte um ProtheusResult em resposta de tool MCP (texto amigável + dados). */
 function toToolResult(r: ProtheusResult) {
   if (r.ok && r.kind === "data") {
     return { content: [{ type: "text" as const, text: JSON.stringify(r.data, null, 2) }] };
@@ -24,202 +23,157 @@ function toToolResult(r: ProtheusResult) {
   return { content: [{ type: "text" as const, text: r.message }], isError: true };
 }
 
-// paginação comum das APIs padrão
-const pageArgs = {
-  page: z.number().int().positive().optional().describe("Número da página (opcional)."),
-  pagesize: z.number().int().positive().optional().describe("Registros por página (opcional)."),
-  fields: z.string().optional().describe("Lista de campos desejados, separada por vírgula (opcional)."),
-  order: z.string().optional().describe("Campo(s) de ordenação (opcional)."),
-};
-
 export function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "protheus-mcp-server", version: "0.1.0" });
+  const server = new McpServer({ name: "protheus-mcp-server", version: "0.2.0" });
 
-  // 1. CUSTOMERCREDITLIMIT — Limite de crédito do cliente (Faturamento)
-  server.registerTool(
-    "protheus_limite_credito_cliente",
-    {
-      title: "Limite de crédito do cliente",
-      description:
-        "Consulta o limite de crédito dos clientes (Faturamento). Sem internalId, retorna a lista; com internalId (código+loja), um cliente específico.",
-      inputSchema: {
-        internalId: z.string().optional().describe("Identificador do cliente (código+loja). Opcional."),
-        ...pageArgs,
-      },
-    },
-    async ({ internalId, page, pagesize, fields, order }) => {
-      const base = "/api/fat/v1/CustomerCreditLimit";
-      const route = internalId ? `${base}/${encodeURIComponent(internalId)}` : base;
-      return toToolResult(await client.get(route, { page, pagesize, fields, order }));
-    }
-  );
+  // ===================== CLIENTES / FINANCEIRO =====================
 
-  // 2. PAYMENTCONDITION — Condições de pagamento (Financeiro)
-  server.registerTool(
-    "protheus_condicoes_pagamento",
-    {
-      title: "Condições de pagamento",
-      description:
-        "Consulta as condições de pagamento (Faturamento/Financeiro). Sem code, retorna a lista; com code, uma condição específica.",
-      inputSchema: {
-        code: z.string().optional().describe("Código da condição de pagamento. Opcional."),
-        ...pageArgs,
-      },
-    },
-    async ({ code, page, pagesize, fields, order }) => {
-      const base = "/api/fat/v1/paymentcondition";
-      const route = code ? `${base}/${encodeURIComponent(code)}` : base;
-      return toToolResult(await client.get(route, { page, pagesize, fields, order }));
-    }
-  );
-
-  // 3. MRPPRODUCT — Produtos (MRP/Estoque)
-  server.registerTool(
-    "protheus_produtos_mrp",
-    {
-      title: "Produtos (MRP)",
-      description:
-        "Consulta produtos do MRP. Sem ID, retorna a lista; com branchId+product, um produto específico. Obs.: base pode estar sem registros.",
-      inputSchema: {
-        branchId: z.string().optional().describe("Filial do produto (com product)."),
-        product: z.string().optional().describe("Código do produto (com branchId)."),
-        ...pageArgs,
-      },
-    },
-    async ({ branchId, product, page, pagesize, fields, order }) => {
-      const base = "/api/pcp/v1/mrpproduct";
-      const route = branchId && product ? `${base}/${encodeURIComponent(branchId)}/${encodeURIComponent(product)}` : base;
-      return toToolResult(await client.get(route, { page, pagesize, fields, order }));
-    }
-  );
-
-  // 4. MRPSTOCKBALANCE — Saldo em estoque (MRP)
-  server.registerTool(
-    "protheus_saldo_estoque_mrp",
-    {
-      title: "Saldo em estoque (MRP)",
-      description:
-        "Consulta os saldos em estoque do MRP. Sem ID, retorna a lista; com branchId+code, um registro específico. Obs.: base pode estar sem registros.",
-      inputSchema: {
-        branchId: z.string().optional().describe("Filial (com code)."),
-        code: z.string().optional().describe("Código do registro (com branchId)."),
-        ...pageArgs,
-      },
-    },
-    async ({ branchId, code, page, pagesize, fields, order }) => {
-      const base = "/api/pcp/v1/mrpstockbalance";
-      const route = branchId && code ? `${base}/${encodeURIComponent(branchId)}/${encodeURIComponent(code)}` : base;
-      return toToolResult(await client.get(route, { page, pagesize, fields, order }));
-    }
-  );
-
-  // 5. MRPWAREHOUSE — Armazéns (MRP)
-  server.registerTool(
-    "protheus_armazens_mrp",
-    {
-      title: "Armazéns (MRP)",
-      description:
-        "Consulta os armazéns do MRP. Sem ID, retorna a lista; com branchId+code, um armazém específico. Obs.: base pode estar sem registros.",
-      inputSchema: {
-        branchId: z.string().optional().describe("Filial (com code)."),
-        code: z.string().optional().describe("Código do armazém (com branchId)."),
-        ...pageArgs,
-      },
-    },
-    async ({ branchId, code, page, pagesize, fields, order }) => {
-      const base = "/api/pcp/v1/mrpwarehouse";
-      const route = branchId && code ? `${base}/${encodeURIComponent(branchId)}/${encodeURIComponent(code)}` : base;
-      return toToolResult(await client.get(route, { page, pagesize, fields, order }));
-    }
-  );
-
-  // 6. MRPPURCHASEORDER — Solicitações de compra (MRP) [ambiente DFL = SOLICITAÇÕES]
-  server.registerTool(
-    "protheus_solicitacoes_compra_mrp",
-    {
-      title: "Solicitações de compra (MRP)",
-      description:
-        "Solicitações de compra do MRP (endpoint MRPPurchaseOrder — no ambiente DFL retorna SOLICITAÇÕES). Sem ID, lista; com branchId+code, uma específica. Obs.: base pode estar sem registros.",
-      inputSchema: {
-        branchId: z.string().optional().describe("Filial (com code)."),
-        code: z.string().optional().describe("Código (com branchId)."),
-        ...pageArgs,
-      },
-    },
-    async ({ branchId, code, page, pagesize, fields, order }) => {
-      const base = "/api/pcp/v1/mrppurchaseorder";
-      const route = branchId && code ? `${base}/${encodeURIComponent(branchId)}/${encodeURIComponent(code)}` : base;
-      return toToolResult(await client.get(route, { page, pagesize, fields, order }));
-    }
-  );
-
-  // 7. MRPPURCHASEREQUEST — Pedidos de compra (MRP) [ambiente DFL = PEDIDOS]
-  server.registerTool(
-    "protheus_pedidos_compra_mrp",
-    {
-      title: "Pedidos de compra (MRP)",
-      description:
-        "Pedidos de compra do MRP (endpoint MRPPurchaseRequest — no ambiente DFL retorna PEDIDOS). Sem ID, lista; com branchId+code, um específico. Obs.: base pode estar sem registros.",
-      inputSchema: {
-        branchId: z.string().optional().describe("Filial (com code)."),
-        code: z.string().optional().describe("Código (com branchId)."),
-        ...pageArgs,
-      },
-    },
-    async ({ branchId, code, page, pagesize, fields, order }) => {
-      const base = "/api/pcp/v1/mrppurchaserequest";
-      const route = branchId && code ? `${base}/${encodeURIComponent(branchId)}/${encodeURIComponent(code)}` : base;
-      return toToolResult(await client.get(route, { page, pagesize, fields, order }));
-    }
-  );
-
-  // 8. PAYMENT — Folha de pagamento (RH) — DADO SENSÍVEL
-  server.registerTool(
-    "protheus_folha_pagamento",
-    {
-      title: "Folha de pagamento (RH)",
-      description:
-        "Demonstrativo de pagamento (RH). Sem employeeId, retorna os tipos de alteração salarial (sem dado pessoal). Com employeeId, retorna o demonstrativo do funcionário — DADO PESSOAL SENSÍVEL (LGPD).",
-      inputSchema: {
-        employeeId: z.string().optional().describe("Matrícula do funcionário. Opcional (dado sensível)."),
-      },
-    },
-    async ({ employeeId }) => {
-      const route = employeeId ? `/payment/payments/${encodeURIComponent(employeeId)}` : "/payment/salaryHistory/type";
-      return toToolResult(await client.get(route, {}));
-    }
-  );
-
-  // 9. WSRCLIENTE — Clientes por vendedor (customizado)
+  // 1. WSRCLIENTE — clientes de um vendedor (e-mail do vendedor). [WSRECEIVE EMAIL — OK]
   server.registerTool(
     "protheus_clientes_por_vendedor",
     {
       title: "Clientes por vendedor (WSRCLIENTE)",
       description:
-        "Retorna os clientes vinculados a um vendedor/gerente, identificado pelo e-mail (SA3.A3_EMAIL). Atenção: o e-mail é do VENDEDOR, não do cliente.",
-      inputSchema: {
-        email: z.string().describe("E-mail do vendedor/gerente (obrigatório)."),
-      },
+        "Retorna os clientes vinculados a um vendedor/gerente, identificado pelo e-mail (SA3.A3_EMAIL). O e-mail é do VENDEDOR, não do cliente.",
+      inputSchema: { email: z.string().describe("E-mail do vendedor/gerente (obrigatório).") },
     },
-    async ({ email }) => {
-      return toToolResult(await client.get("/WSRCLIENTE", { email }));
-    }
+    async ({ email }) => toToolResult(await client.get("/WSRCLIENTE", { email }))
   );
 
-  // 10. WSRSALDOCLIENTE — Saldo em aberto do cliente (customizado)
+  // 2. WSRSALDOCLIENTE — saldo em aberto do cliente (títulos SE1). [WSRECEIVE FIL — precisa ADVPL receber CLIENTE]
   server.registerTool(
     "protheus_saldo_cliente",
     {
       title: "Saldo em aberto do cliente (WSRSALDOCLIENTE)",
       description:
-        "Retorna o saldo em aberto (títulos a receber, SE1) de um cliente. Informe o código do cliente. Empresa/filial são fixadas em 03/01 pelo web service.",
+        "Saldo em aberto (títulos a receber, SE1) de um cliente. Informe o código do cliente. Empresa/filial fixas em 03/01 no web service.",
+      inputSchema: { cliente: z.string().describe("Código do cliente (E1_CLIENTE) — obrigatório.") },
+    },
+    async ({ cliente }) => toToolResult(await client.get("/WSRSALDOCLIENTE", { cliente, fil: "01" }))
+  );
+
+  // 3. WSRCONTASR — contas a receber por cliente/período. [WSRECEIVE FILIAL — precisa ADVPL]
+  server.registerTool(
+    "protheus_contas_receber",
+    {
+      title: "Contas a receber (WSRCONTASR)",
+      description:
+        "Títulos a receber de um cliente, opcionalmente por período. Informe o código do cliente (e loja). Datas no formato AAAAMMDD.",
       inputSchema: {
-        cliente: z.string().describe("Código do cliente (E1_CLIENTE) — obrigatório."),
+        codcli: z.string().describe("Código do cliente (obrigatório)."),
+        codloja: z.string().optional().describe("Loja do cliente (opcional)."),
+        datainicio: z.string().optional().describe("Data inicial AAAAMMDD (opcional)."),
+        datafim: z.string().optional().describe("Data final AAAAMMDD (opcional)."),
       },
     },
-    async ({ cliente }) => {
-      return toToolResult(await client.get("/WSRSALDOCLIENTE", { cliente }));
-    }
+    async ({ codcli, codloja, datainicio, datafim }) =>
+      toToolResult(
+        await client.get("/WSRCONTASR", {
+          fil: "01",
+          codcli,
+          codloja,
+          dataini: datainicio,
+          datafim,
+        })
+      )
+  );
+
+  // 4. WSRCONSAFES — cliente por CNPJ. [WSRECEIVE CNPJ — OK]
+  server.registerTool(
+    "protheus_cliente_por_cnpj",
+    {
+      title: "Cliente por CNPJ (WSRCONSAFES)",
+      description: "Retorna o(s) cliente(s) no Protheus a partir do CNPJ informado.",
+      inputSchema: { cnpj: z.string().describe("CNPJ do cliente (só números ou formatado) — obrigatório.") },
+    },
+    async ({ cnpj }) => toToolResult(await client.get("/WSRCONSAFES", { cnpj, fil: "01" }))
+  );
+
+  // ===================== PRODUTOS / ESTOQUE =====================
+
+  // 5. WSRB2BPRODUTO — produtos (filial/armazém). [WSRECEIVE FIL — OK p/ FIL]
+  server.registerTool(
+    "protheus_produtos",
+    {
+      title: "Produtos (WSRB2BPRODUTO)",
+      description: "Retorna os produtos do Protheus. Opcionalmente por armazém. (Serviço B2B customizado.)",
+      inputSchema: {
+        armazem: z.string().optional().describe("Código do armazém (opcional)."),
+        operacao: z.string().optional().describe("Operação/filtro do serviço (opcional)."),
+      },
+    },
+    async ({ armazem, operacao }) =>
+      toToolResult(await client.get("/WSRB2BPRODUTO", { fil: "01", armazem, operacao }))
+  );
+
+  // 6. WSRCRMSB2 — saldo em estoque por produto. [WSRECEIVE incorreto — precisa ADVPL]
+  server.registerTool(
+    "protheus_saldo_estoque",
+    {
+      title: "Saldo em estoque (WSRCRMSB2)",
+      description: "Retorna o saldo em estoque dos produtos (SB2). Opcionalmente filtra por produto.",
+      inputSchema: {
+        produto: z.string().optional().describe("Código do produto (opcional)."),
+        operacao: z.string().optional().describe("Operação/filtro (opcional)."),
+      },
+    },
+    async ({ produto, operacao }) =>
+      toToolResult(await client.get("/WSRCRMSB2", { fil: "01", produto, operacao }))
+  );
+
+  // 7. WSRESTRUTURA — estrutura do produto (PAI/REV). [WSRECEIVE FILIAL — precisa ADVPL]
+  server.registerTool(
+    "protheus_estrutura_produto",
+    {
+      title: "Estrutura do produto (WSRESTRUTURA)",
+      description: "Retorna os itens da estrutura (BOM) de um produto pai, para uma revisão.",
+      inputSchema: {
+        pai: z.string().describe("Código do produto pai (obrigatório)."),
+        rev: z.string().optional().describe("Revisão da estrutura (opcional)."),
+      },
+    },
+    async ({ pai, rev }) => toToolResult(await client.get("/WSRESTRUTURA", { fil: "01", pai, rev }))
+  );
+
+  // ===================== COMPRAS =====================
+
+  // 8. WSRESTSC — solicitação de compra por número. [WSRECEIVE RECEIVE — precisa ADVPL]
+  server.registerTool(
+    "protheus_solicitacao_compra",
+    {
+      title: "Solicitação de compra por número (WSRESTSC)",
+      description:
+        "Retorna os dados de uma Solicitação de Compra (SC1) pelo número, com itens e centro de custo.",
+      inputSchema: { numsc: z.string().describe("Número da solicitação de compra (C1_NUM) — obrigatório.") },
+    },
+    async ({ numsc }) => toToolResult(await client.get("/WSRESTSC", { numsc, op: "1", fil: "01" }))
+  );
+
+  // 9. WSRPCABERTO — pedidos de compra em aberto por fornecedor/loja. [WSRECEIVE FILIAL — precisa ADVPL]
+  server.registerTool(
+    "protheus_pedidos_compra_aberto",
+    {
+      title: "Pedidos de compra em aberto (WSRPCABERTO)",
+      description:
+        "Retorna os Pedidos de Compra (SC7) em aberto de um fornecedor+loja, com saldo, armazém e centro de custo.",
+      inputSchema: {
+        fornece: z.string().describe("Código do fornecedor (obrigatório)."),
+        loja: z.string().describe("Loja do fornecedor (obrigatório)."),
+      },
+    },
+    async ({ fornece, loja }) =>
+      toToolResult(await client.get("/WSRPCABERTO", { fornece, loja, filial: "01" }))
+  );
+
+  // 10. WSRFORNECE — fornecedor. [WSRECEIVE FORNECE — OK]
+  server.registerTool(
+    "protheus_fornecedor",
+    {
+      title: "Fornecedor (WSRFORNECE)",
+      description: "Retorna os dados de um fornecedor pelo código.",
+      inputSchema: { fornece: z.string().describe("Código do fornecedor (A2_COD) — obrigatório.") },
+    },
+    async ({ fornece }) => toToolResult(await client.get("/WSRFORNECE", { fornece, fil: "01" }))
   );
 
   return server;
