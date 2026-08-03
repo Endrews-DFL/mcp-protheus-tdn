@@ -39,7 +39,7 @@ export function createMcpServer(): McpServer {
         "Retorna os clientes vinculados a um vendedor/gerente, identificado pelo e-mail (SA3.A3_EMAIL). O e-mail é do VENDEDOR, não do cliente.",
       inputSchema: { email: z.string().describe("E-mail do vendedor/gerente (obrigatório).") },
     },
-    async ({ email }) => toToolResult(await client.get("/WSRCLIENTE", { email }))
+    async ({ email }) => toToolResult(await client.get("/WSRCLIENTE", { email, fil: "01" }))
   );
 
   // 2. WSRSALDOCLIENTE — saldo em aberto do cliente (títulos SE1). [WSRECEIVE FIL — precisa ADVPL receber CLIENTE]
@@ -101,11 +101,11 @@ export function createMcpServer(): McpServer {
       description: "Retorna os produtos do Protheus. Opcionalmente por armazém. (Serviço B2B customizado.)",
       inputSchema: {
         armazem: z.string().optional().describe("Código do armazém (opcional)."),
-        operacao: z.string().optional().describe("Operação/filtro do serviço (opcional)."),
+        operacao: z.string().optional().describe("Operação: LISTA (padrão), ESTOQUE ou PRECO."),
       },
     },
     async ({ armazem, operacao }) =>
-      toToolResult(await client.get("/WSRB2BPRODUTO", { fil: "01", armazem, operacao }))
+      toToolResult(await client.get("/WSRB2BPRODUTO", { fil: "01", armazem, operacao: operacao || "LISTA" }))
   );
 
   // 6. WSRCRMSB2 — saldo em estoque por produto. [WSRECEIVE incorreto — precisa ADVPL]
@@ -116,11 +116,11 @@ export function createMcpServer(): McpServer {
       description: "Retorna o saldo em estoque dos produtos (SB2). Opcionalmente filtra por produto.",
       inputSchema: {
         produto: z.string().optional().describe("Código do produto (opcional)."),
-        operacao: z.string().optional().describe("Operação/filtro (opcional)."),
+        operacao: z.string().optional().describe("Operação: LISTA (padrão) ou ESTOQUE."),
       },
     },
     async ({ produto, operacao }) =>
-      toToolResult(await client.get("/WSRCRMSB2", { fil: "01", produto, operacao }))
+      toToolResult(await client.get("/WSRCRMSB2", { fil: "01", produto, operacao: operacao || "LISTA" }))
   );
 
   // 7. WSRESTRUTURA — estrutura do produto (PAI/REV). [WSRECEIVE FILIAL — precisa ADVPL]
