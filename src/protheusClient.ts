@@ -163,8 +163,13 @@ export class ProtheusClient {
       Authorization: `Bearer ${this.token?.accessToken ?? ""}`,
     };
     if (this.cfg.tenantId) headers["tenantId"] = this.cfg.tenantId;
-    const res = await fetch(url, { method: "GET", headers });
-    return { status: res.status, body: await res.text() };
+    try {
+      const res = await fetch(url, { method: "GET", headers, signal: AbortSignal.timeout(25000) });
+      return { status: res.status, body: await res.text() };
+    } catch (e: any) {
+      const cause = e?.name === "TimeoutError" ? "timeout (25s)" : e?.cause?.code || e?.message || "erro";
+      return { status: 0, body: `ERRO_CONEXAO: ${cause}` };
+    }
   }
 
   // ---------- Normalização amigável ----------

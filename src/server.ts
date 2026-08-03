@@ -11,11 +11,51 @@ import { ProtheusClient, ProtheusResult } from "./protheusClient.js";
 const cfg = loadConfig();
 const client = new ProtheusClient(cfg.protheus);
 
-export const toolCount = 10;
+export const toolCount = 11;
+
+// Lista de todos os web services com método GET (varredura de diagnóstico).
+const WS_GET = [
+  "WSBORDERO", "WSCONSAFES", "WSCONSULTA", "WSDESPESA", "WSDSLEVERP", "WSESTRUTSB1", "WSLERNFSF1",
+  "WSRAPROVCC", "WSRB2BCLIENTE", "WSRB2BPRODUTO", "WSRB2BSB1", "WSRCLIABE", "WSRCLIENTE", "WSRCONTASR",
+  "WSRCRMPRECO", "WSRCRMSA1", "WSRCRMSB1", "WSRCRMSB2", "WSRDFLFATR01", "WSREMPENHO", "WSRESTCONTA",
+  "WSRESTFORNECEDORES", "WSRESTRUTURA", "WSRESTSC", "WSRFLUXOMEDICAO", "WSRFORNECE", "WSRFUNC",
+  "WSRFUNCTERC", "WSRGESTOR", "WSRITENSORC", "WSRLANCCTB", "WSRNIVER", "WSROP", "WSROPER", "WSRORDEM",
+  "WSRPAAPEND", "WSRPCABERTO", "WSRPRODUTO", "WSRRECAPV", "WSRRECUR", "WSRREEAPV", "WSRROTEIRO",
+  "WSRSA1EX", "WSRSA2TOPN", "WSRSALDOCLIENTE", "WSRSB1PA", "WSRSOLICITANTECC", "WSRSRASUPERIOR",
+  "WSRSTAP", "WSRSTPC", "WSRSYD", "WSRSZM", "WSRTERCEIRO", "WSRTIPOREE", "WSRTITOPEN", "WSRTRACKORD",
+  "WSRTRANSPORTE", "WSRUSERCARGO", "WSRUSERSRA", "WSRUSUARIOS", "WSSB1TOPN", "WSTABELA", "WSTITULOS",
+  "wsrInspContagem",
+];
+
+// Parâmetros DEV conhecidos — enviados a todos (o WS usa o que precisa e ignora o resto).
+const DEV_PARAMS: Record<string, string> = {
+  fil: "01", filial: "01", fornece: "A04559", loja: "01", cnpj: "62849644000106",
+  cliente: "000087", codcli: "000087", codloja: "01", cc: "600011", ccusto: "600011",
+  email: "endrews.santos@dfl.com.br", login: "endrews.santos", operacao: "LISTA", mes: "01",
+};
+
+// Evita estourar o limite do Claude: se algum array vier gigante, mostra os primeiros N e avisa.
+const MAX_ITEMS = 100;
+function capLargeArrays(data: unknown): unknown {
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const obj = data as Record<string, unknown>;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (Array.isArray(v) && v.length > MAX_ITEMS) {
+        const total = v.length;
+        obj[k] = v.slice(0, MAX_ITEMS);
+        obj[`_aviso_${k}`] = `Mostrando ${MAX_ITEMS} de ${total} registros (resposta truncada). Este serviço não tem filtro nativo — refine a busca ou peça um parâmetro de filtro ao time ADVPL.`;
+      }
+    }
+  }
+  return data;
+}
 
 function toToolResult(r: ProtheusResult) {
   if (r.ok && r.kind === "data") {
-    return { content: [{ type: "text" as const, text: JSON.stringify(r.data, null, 2) }] };
+    let text = JSON.stringify(capLargeArrays(r.data), null, 2);
+    if (text.length > 120000) text = text.slice(0, 120000) + "\n…[resposta truncada por tamanho]";
+    return { content: [{ type: "text" as const, text }] };
   }
   if (r.ok && r.kind === "empty") {
     return { content: [{ type: "text" as const, text: r.message }] };
@@ -176,6 +216,40 @@ export function createMcpServer(): McpServer {
       inputSchema: { fornece: z.string().describe("Código do fornecedor (A2_COD) — obrigatório.") },
     },
     async ({ fornece }) => toToolResult(await client.get("/WSRFORNECE", { fornece, fil: "01" }))
+  );
+
+  // ===================== DIAGNÓSTICO (varredura de todos os WS GET) =====================
+  server.registerTool(
+    "protheus_diagnostico",
+    {
+      title: "Diagnóstico — varre todos os WS GET (DEV)",
+      description:
+        "Percorre todos os web services GET com os parâmetros DEV conhecidos e retorna um resumo compacto por serviço (status: ok/vazio/erro, tamanho, amostra). Uso interno de teste.",
+      inputSchema: {},
+    },
+    async () => {
+      const out: Array<Record<string, unknown>> = [];
+      for (const s of WS_GET) {
+        const inicio = Date.now();
+        const r = await client.get("/" + s, DEV_PARAMS);
+        const ms = Date.now() - inicio;
+        if (r.ok && r.kind === "data") {
+          const t = JSON.stringify(r.data);
+          out.push({ servico: s, status: "ok", ms, tamanho: t.length, amostra: t.slice(0, 140) });
+        } else if (r.ok && r.kind === "empty") {
+          out.push({ servico: s, status: "vazio", ms, amostra: r.message.slice(0, 140) });
+        } else {
+          out.push({ servico: s, status: "erro", ms, amostra: (r.message + " " + String(r.raw ?? "")).slice(0, 160) });
+        }
+      }
+      const resumo = {
+        total: out.length,
+        ok: out.filter((x) => x.status === "ok").length,
+        vazio: out.filter((x) => x.status === "vazio").length,
+        erro: out.filter((x) => x.status === "erro").length,
+      };
+      return { content: [{ type: "text" as const, text: JSON.stringify({ resumo, servicos: out }, null, 1) }] };
+    }
   );
 
   return server;
