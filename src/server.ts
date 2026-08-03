@@ -20,7 +20,9 @@ function toToolResult(r: ProtheusResult) {
   if (r.ok && r.kind === "empty") {
     return { content: [{ type: "text" as const, text: r.message }] };
   }
-  return { content: [{ type: "text" as const, text: r.message }], isError: true };
+  const raw = r.ok ? undefined : r.raw;
+  const detail = raw ? `\n\n[resposta do Protheus]: ${String(raw).slice(0, 600)}` : "";
+  return { content: [{ type: "text" as const, text: r.message + detail }], isError: true };
 }
 
 export function createMcpServer(): McpServer {
