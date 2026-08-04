@@ -1,7 +1,7 @@
 {
   "name": "protheus-mcp-server",
-  "version": "0.1.0",
-  "description": "Conector MCP somente-leitura para consulta ao Protheus (TOTVS) da DFL — piloto de 10 endpoints.",
+  "version": "0.4.0",
+  "description": "Conector MCP somente-leitura para consulta ao Protheus (TOTVS) da DFL — 39 web services customizados (WSR*).",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -12,7 +12,10 @@
     "start": "node dist/index.js",
     "start:stdio": "cross-env MCP_TRANSPORT=stdio node dist/index.js",
     "start:http": "cross-env MCP_TRANSPORT=http node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test:smoke": "node testar.mjs",
+    "test:mcp": "node testar-mcp.mjs",
+    "test:tools": "node testar-todas-tools.mjs"
   },
   "engines": {
     "node": ">=18"

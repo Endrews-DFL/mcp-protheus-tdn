@@ -1,7 +1,6 @@
 /**
- * Fábrica do servidor MCP: registra as tools de consulta.
- * Piloto atual: usa EXCLUSIVAMENTE web services customizados da DFL (WSR*), sempre GET.
- * O ProtheusClient é singleton de módulo (cache de token compartilhado, mesmo no HTTP stateless).
+ * Fábrica do servidor MCP. Tools de consulta (somente GET) sobre os web services
+ * customizados da DFL (WSR*), definidas por configuração. Inclui a tool de diagnóstico.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -11,30 +10,8 @@ import { ProtheusClient, ProtheusResult } from "./protheusClient.js";
 const cfg = loadConfig();
 const client = new ProtheusClient(cfg.protheus);
 
-export const toolCount = 11;
+// ---------------- utilidades de resposta ----------------
 
-// Lista de todos os web services com método GET (varredura de diagnóstico).
-const WS_GET = [
-  "WSBORDERO", "WSCONSAFES", "WSCONSULTA", "WSDESPESA", "WSDSLEVERP", "WSESTRUTSB1", "WSLERNFSF1",
-  "WSRAPROVCC", "WSRB2BCLIENTE", "WSRB2BPRODUTO", "WSRB2BSB1", "WSRCLIABE", "WSRCLIENTE", "WSRCONTASR",
-  "WSRCRMPRECO", "WSRCRMSA1", "WSRCRMSB1", "WSRCRMSB2", "WSRDFLFATR01", "WSREMPENHO", "WSRESTCONTA",
-  "WSRESTFORNECEDORES", "WSRESTRUTURA", "WSRESTSC", "WSRFLUXOMEDICAO", "WSRFORNECE", "WSRFUNC",
-  "WSRFUNCTERC", "WSRGESTOR", "WSRITENSORC", "WSRLANCCTB", "WSRNIVER", "WSROP", "WSROPER", "WSRORDEM",
-  "WSRPAAPEND", "WSRPCABERTO", "WSRPRODUTO", "WSRRECAPV", "WSRRECUR", "WSRREEAPV", "WSRROTEIRO",
-  "WSRSA1EX", "WSRSA2TOPN", "WSRSALDOCLIENTE", "WSRSB1PA", "WSRSOLICITANTECC", "WSRSRASUPERIOR",
-  "WSRSTAP", "WSRSTPC", "WSRSYD", "WSRSZM", "WSRTERCEIRO", "WSRTIPOREE", "WSRTITOPEN", "WSRTRACKORD",
-  "WSRTRANSPORTE", "WSRUSERCARGO", "WSRUSERSRA", "WSRUSUARIOS", "WSSB1TOPN", "WSTABELA", "WSTITULOS",
-  "wsrInspContagem",
-];
-
-// Parâmetros DEV conhecidos — enviados a todos (o WS usa o que precisa e ignora o resto).
-const DEV_PARAMS: Record<string, string> = {
-  fil: "01", filial: "01", fornece: "A04559", loja: "01", cnpj: "62849644000106",
-  cliente: "000087", codcli: "000087", codloja: "01", cc: "600011", ccusto: "600011",
-  email: "endrews.santos@dfl.com.br", login: "endrews.santos", operacao: "LISTA", mes: "01",
-};
-
-// Evita estourar o limite do Claude: se algum array vier gigante, mostra os primeiros N e avisa.
 const MAX_ITEMS = 100;
 function capLargeArrays(data: unknown): unknown {
   if (data && typeof data === "object" && !Array.isArray(data)) {
@@ -44,7 +21,7 @@ function capLargeArrays(data: unknown): unknown {
       if (Array.isArray(v) && v.length > MAX_ITEMS) {
         const total = v.length;
         obj[k] = v.slice(0, MAX_ITEMS);
-        obj[`_aviso_${k}`] = `Mostrando ${MAX_ITEMS} de ${total} registros (resposta truncada). Este serviço não tem filtro nativo — refine a busca ou peça um parâmetro de filtro ao time ADVPL.`;
+        obj[`_aviso_${k}`] = `Mostrando ${MAX_ITEMS} de ${total} registros (truncado). Refine a busca ou peça um filtro ao ADVPL.`;
       }
     }
   }
@@ -61,170 +38,204 @@ function toToolResult(r: ProtheusResult) {
     return { content: [{ type: "text" as const, text: r.message }] };
   }
   const raw = r.ok ? undefined : r.raw;
-  const detail = raw ? `\n\n[resposta do Protheus]: ${String(raw).slice(0, 600)}` : "";
+  const detail = raw ? `\n\n[resposta do Protheus]: ${String(raw).slice(0, 400)}` : "";
   return { content: [{ type: "text" as const, text: r.message + detail }], isError: true };
 }
 
+// ---------------- definição das tools (WSR que retornam dados) ----------------
+
+interface ParamDef { key: string; required?: boolean; desc: string; default?: string }
+interface ToolDef { name: string; service: string; title: string; description: string; params: ParamDef[] }
+
+const TOOLS: ToolDef[] = [
+  // Clientes / financeiro
+  { name: "protheus_clientes", service: "WSRCRMSA1", title: "Clientes (cadastro)",
+    description: "Cadastro de clientes (SA1). Sem filtro retorna a lista (grande). Pode filtrar por e-mail.",
+    params: [{ key: "operacao", desc: "Operação (LISTA por padrão).", default: "LISTA" }, { key: "email", desc: "E-mail para filtrar (opcional)." }] },
+  { name: "protheus_clientes_saldo_aberto", service: "WSRCLIABE", title: "Clientes com saldo em aberto",
+    description: "Clientes com saldo/adiantamentos em aberto. Pode informar o código do cliente.",
+    params: [{ key: "cliente", desc: "Código do cliente (opcional)." }] },
+  { name: "protheus_clientes_estrangeiros", service: "WSRSA1EX", title: "Clientes estrangeiros",
+    description: "Lista os clientes estrangeiros cadastrados.", params: [] },
+  { name: "protheus_clientes_por_vendedor", service: "WSRCLIENTE", title: "Clientes por vendedor",
+    description: "Clientes vinculados a um vendedor/gerente pelo e-mail (SA3.A3_EMAIL). O e-mail é do VENDEDOR.",
+    params: [{ key: "email", required: true, desc: "E-mail do vendedor/gerente." }] },
+  { name: "protheus_saldo_cliente", service: "WSRSALDOCLIENTE", title: "Saldo em aberto do cliente",
+    description: "Saldo em aberto (títulos SE1) de um cliente. Empresa/filial 03/01.",
+    params: [{ key: "cliente", required: true, desc: "Código do cliente (E1_CLIENTE)." }] },
+  { name: "protheus_cliente_por_cnpj", service: "WSCONSAFES", title: "Cliente por CNPJ",
+    description: "Retorna cliente(s) a partir do CNPJ.", params: [{ key: "cnpj", required: true, desc: "CNPJ do cliente." }] },
+
+  // Produtos / estoque
+  { name: "protheus_produtos", service: "WSRB2BPRODUTO", title: "Produtos (B2B)",
+    description: "Produtos (PA). operacao=LISTA (padrão), ESTOQUE ou PRECO. Base grande — use filtro se possível.",
+    params: [{ key: "operacao", desc: "LISTA (padrão), ESTOQUE ou PRECO.", default: "LISTA" }, { key: "armazem", desc: "Armazém (opcional)." }] },
+  { name: "protheus_produtos_preco", service: "WSRCRMSB1", title: "Produtos (preço/tabela)",
+    description: "Produtos com dados de preço. Pode informar a tabela (codtab).",
+    params: [{ key: "codtab", desc: "Código da tabela de preço (opcional)." }] },
+  { name: "protheus_produtos_pa", service: "WSRSB1PA", title: "Produtos PA (código+descrição)",
+    description: "Lista de produtos PA (código e descrição).", params: [] },
+  { name: "protheus_saldo_estoque", service: "WSRCRMSB2", title: "Saldo em estoque",
+    description: "Saldo em estoque (SB2, armazém 04). operacao=LISTA (padrão) ou ESTOQUE.",
+    params: [{ key: "operacao", desc: "LISTA (padrão) ou ESTOQUE.", default: "LISTA" }, { key: "produto", desc: "Código do produto (opcional)." }] },
+
+  // Compras
+  { name: "protheus_solicitacao_compra", service: "WSRESTSC", title: "Solicitação de compra (por número)",
+    description: "Dados de uma Solicitação de Compra (SC1) pelo número, com itens e centro de custo.",
+    params: [{ key: "numsc", required: true, desc: "Número da SC (C1_NUM)." }, { key: "op", desc: "Operação interna.", default: "1" }] },
+  { name: "protheus_pedidos_compra_aberto", service: "WSRPCABERTO", title: "Pedidos de compra em aberto",
+    description: "Pedidos de Compra (SC7) em aberto de um fornecedor+loja, com saldo e centro de custo.",
+    params: [{ key: "fornece", required: true, desc: "Código do fornecedor." }, { key: "loja", required: true, desc: "Loja do fornecedor." }] },
+
+  // Faturamento / contábil / fiscal
+  { name: "protheus_faturamento_pedidos", service: "WSRDFLFATR01", title: "Pedidos / faturamento (status)",
+    description: "Pedidos de venda com status (expedição, região, cliente).", params: [] },
+  { name: "protheus_plano_contas", service: "WSRESTCONTA", title: "Plano de contas",
+    description: "Plano de contas contábil (código, descrição, situação).", params: [] },
+  { name: "protheus_ncm", service: "WSRSYD", title: "Tabela NCM",
+    description: "Tabela de NCM (código e descrição). Base grande.", params: [] },
+
+  // RH / acessos
+  { name: "protheus_funcionarios", service: "WSRFUNC", title: "Funcionários",
+    description: "Funcionários (matrícula, nome, cargo, CC). Pode filtrar por mês.",
+    params: [{ key: "mes", desc: "Mês (MM) para filtro (opcional)." }] },
+  { name: "protheus_aniversariantes", service: "WSRNIVER", title: "Aniversariantes",
+    description: "Aniversariantes do mês.", params: [{ key: "mes", desc: "Mês (MM) (opcional)." }] },
+  { name: "protheus_usuarios_cargo", service: "WSRUSERCARGO", title: "Usuários × cargo × centro de custo",
+    description: "Usuários com cargo, CPF, matrícula e centro de custo.", params: [] },
+  { name: "protheus_aprovadores", service: "WSRSRASUPERIOR", title: "Aprovadores (cargo superior)",
+    description: "Colaboradores com cargo superior (alçada de aprovação). Pode filtrar por e-mail ou CC.",
+    params: [{ key: "email", desc: "E-mail (opcional)." }, { key: "cc", desc: "Centro de custo (opcional)." }] },
+  { name: "protheus_acesso_terceiros", service: "WSRTERCEIRO", title: "Liberação de acesso (terceiros)",
+    description: "Liberações de acesso de terceiros (matrícula/CPF, nome, empresa).", params: [] },
+
+  // Produção
+  { name: "protheus_operacoes", service: "WSROPER", title: "Operações (roteiro)",
+    description: "Operações de produção por produto (recurso, descrição).", params: [] },
+  { name: "protheus_recursos", service: "WSRRECUR", title: "Recursos (produção)",
+    description: "Recursos de produção (código, descrição, linha, CC).", params: [] },
+
+  // Logística / outros
+  { name: "protheus_transportadoras", service: "WSRTRANSPORTE", title: "Transportadoras",
+    description: "Transportadoras (código e nome).", params: [] },
+  { name: "protheus_tipos_reembolso", service: "WSRSZM", title: "Tipos de reembolso",
+    description: "Tipos de reembolso (código, descrição, natureza).", params: [] },
+  { name: "protheus_categorias_reembolso", service: "WSRTIPOREE", title: "Categorias de reembolso",
+    description: "Categorias de reembolso (código, tipo, valores).", params: [] },
+
+  // ---- Completando os 37 (OK + vazio) do diagnóstico de 03/08/2026 ----
+
+  // Produtos / estrutura
+  { name: "protheus_produto_tabela", service: "WSRPRODUTO", title: "Produto por tabela de preço",
+    description: "Produto(s) de uma tabela de preço. Sem 'codtab' o serviço responde \"Tabela [] não encontrada\".",
+    params: [{ key: "codtab", required: true, desc: "Código da tabela de preço (obrigatório)." },
+             { key: "produto", desc: "Código do produto (opcional)." }] },
+  { name: "protheus_estrutura_produto", service: "WSRESTRUTURA", title: "Estrutura do produto (BOM)",
+    description: "Itens da estrutura (BOM) de um produto pai, para uma revisão. Contrato confirmado em produção (pai/rev).",
+    params: [{ key: "pai", required: true, desc: "Código do produto pai (obrigatório)." },
+             { key: "rev", desc: "Revisão da estrutura (opcional)." }] },
+  { name: "protheus_produtos_estrutura_sb1", service: "WSESTRUTSB1", title: "Produtos (filtro SB1 para estrutura)",
+    description: "Consulta de produtos (SB1) usada como apoio de estrutura. Precisa de filtro de produto válido.",
+    params: [{ key: "produto", required: true, desc: "Código do produto (obrigatório)." }] },
+
+  // Compras / centro de custo / orçamento
+  { name: "protheus_aprovador_cc", service: "WSRAPROVCC", title: "Aprovador do centro de custo",
+    description: "Aprovador(es) vinculados a um centro de custo válido.",
+    params: [{ key: "cc", required: true, desc: "Centro de custo (obrigatório)." }] },
+  { name: "protheus_solicitante_cc", service: "WSRSOLICITANTECC", title: "Solicitante por centro de custo",
+    description: "Solicitante vinculado a um centro de custo, identificado pelo login.",
+    params: [{ key: "login", required: true, desc: "Login do solicitante (obrigatório)." },
+             { key: "cc", desc: "Centro de custo (opcional)." }] },
+  { name: "protheus_itens_orcamento", service: "WSRITENSORC", title: "Itens do orçamento",
+    description: "Itens de orçamento por centro de custo e/ou projeto.",
+    params: [{ key: "cc", desc: "Centro de custo (opcional, mas recomendado)." },
+             { key: "projeto", desc: "Projeto do orçamento (opcional)." }] },
+  { name: "protheus_bordero", service: "WSBORDERO", title: "Borderô",
+    description: "Dados de um borderô pelo código.",
+    params: [{ key: "bordero", required: true, desc: "Código do borderô (obrigatório)." }] },
+  { name: "protheus_empenho", service: "WSREMPENHO", title: "Empenho (OP)",
+    description: "Empenho vinculado a uma Ordem de Produção (OP).",
+    params: [{ key: "op", required: true, desc: "Número da OP (obrigatório)." }] },
+
+  // Produção
+  { name: "protheus_roteiro_producao", service: "WSRROTEIRO", title: "Roteiro de produção",
+    description: "Roteiro de produção de uma Ordem de Produção (OP).",
+    params: [{ key: "op", required: true, desc: "Número da OP (obrigatório)." }] },
+  { name: "protheus_inspecao_contagem", service: "wsrInspContagem", title: "Inspeção de contagem",
+    description: "Dados de inspeção de contagem vinculados a uma OP/inspeção.",
+    params: [{ key: "op", required: true, desc: "Número da OP/inspeção (obrigatório)." }] },
+
+  // Acessos / usuários / status (contrato [?] presumido — confirmar após 1º teste real)
+  { name: "protheus_usuarios", service: "WSRUSUARIOS", title: "Usuários",
+    description: "Lista de usuários; filtra pelo login/usuário quando informado.",
+    params: [{ key: "usuario", desc: "Login/usuário para filtrar (opcional, mas recomendado — sem filtro pode retornar vazio)." }] },
+  { name: "protheus_status_aprovacao_pagamento", service: "WSRSTAP", title: "Status de aprovação de pagamento",
+    description: "[Contrato ainda não confirmado — o serviço responde '{}' sem um parâmetro de pagamento. " +
+      "Ajustar o nome/valor do parâmetro após o 1º teste real; ver index/WSRSTAP no Protheus.]",
+    params: [{ key: "pagamento", desc: "Identificador do pagamento (nome do parâmetro a confirmar)." }] },
+  { name: "protheus_status_cotacao", service: "WSRSTPC", title: "Status de cotação",
+    description: "[Contrato ainda não confirmado — o serviço responde '{}' sem um parâmetro de cotação. " +
+      "Ajustar o nome/valor do parâmetro após o 1º teste real; ver index/WSRSTPC no Protheus.]",
+    params: [{ key: "cotacao", desc: "Identificador da cotação (nome do parâmetro a confirmar)." }] },
+  { name: "protheus_cc_data", service: "WSDSLEVERP", title: "Consulta por centro de custo + data",
+    description: "[Nome do serviço (WSDSLEVERP) não permite inferir o domínio com segurança — contrato " +
+      "presumido a partir do diagnóstico (precisa de CC + data). Confirmar em index/WSDSLEVERP antes de usar em produção.]",
+    params: [{ key: "cc", required: true, desc: "Centro de custo (obrigatório)." },
+             { key: "data", required: true, desc: "Data no formato AAAAMMDD (obrigatório)." }] },
+];
+
+export const toolCount = TOOLS.length + 1; // +1 = diagnóstico
+
+// ---------------- lista para a varredura de diagnóstico ----------------
+
+const WS_GET = [
+  "WSBORDERO", "WSCONSAFES", "WSCONSULTA", "WSDESPESA", "WSDSLEVERP", "WSESTRUTSB1", "WSLERNFSF1",
+  "WSRAPROVCC", "WSRB2BCLIENTE", "WSRB2BPRODUTO", "WSRB2BSB1", "WSRCLIABE", "WSRCLIENTE", "WSRCONTASR",
+  "WSRCRMPRECO", "WSRCRMSA1", "WSRCRMSB1", "WSRCRMSB2", "WSRDFLFATR01", "WSREMPENHO", "WSRESTCONTA",
+  "WSRESTFORNECEDORES", "WSRESTRUTURA", "WSRESTSC", "WSRFLUXOMEDICAO", "WSRFORNECE", "WSRFUNC",
+  "WSRFUNCTERC", "WSRGESTOR", "WSRITENSORC", "WSRLANCCTB", "WSRNIVER", "WSROP", "WSROPER", "WSRORDEM",
+  "WSRPAAPEND", "WSRPCABERTO", "WSRPRODUTO", "WSRRECAPV", "WSRRECUR", "WSRREEAPV", "WSRROTEIRO",
+  "WSRSA1EX", "WSRSA2TOPN", "WSRSALDOCLIENTE", "WSRSB1PA", "WSRSOLICITANTECC", "WSRSRASUPERIOR",
+  "WSRSTAP", "WSRSTPC", "WSRSYD", "WSRSZM", "WSRTERCEIRO", "WSRTIPOREE", "WSRTITOPEN", "WSRTRACKORD",
+  "WSRTRANSPORTE", "WSRUSERCARGO", "WSRUSERSRA", "WSRUSUARIOS", "WSSB1TOPN", "WSTABELA", "WSTITULOS",
+  "wsrInspContagem",
+];
+const DEV_PARAMS: Record<string, string> = {
+  fil: "01", filial: "01", fornece: "A04559", loja: "01", cnpj: "62849644000106",
+  cliente: "000087", codcli: "000087", codloja: "01", cc: "600011", ccusto: "600011",
+  email: "endrews.santos@dfl.com.br", login: "endrews.santos", operacao: "LISTA", mes: "01",
+};
+
+// ---------------- fábrica ----------------
+
 export function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "protheus-mcp-server", version: "0.2.0" });
+  const server = new McpServer({ name: "protheus-mcp-server", version: "0.4.0" });
 
-  // ===================== CLIENTES / FINANCEIRO =====================
+  for (const def of TOOLS) {
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const p of def.params) {
+      shape[p.key] = (p.required ? z.string() : z.string().optional()).describe(p.desc);
+    }
+    server.registerTool(
+      def.name,
+      { title: def.title, description: def.description, inputSchema: shape },
+      async (args: Record<string, unknown>) => {
+        const query: Record<string, string> = { fil: "01" };
+        for (const p of def.params) {
+          const v = (args?.[p.key] as string | undefined) ?? p.default;
+          if (v !== undefined && v !== "") query[p.key] = v;
+        }
+        return toToolResult(await client.get("/" + def.service, query));
+      }
+    );
+  }
 
-  // 1. WSRCLIENTE — clientes de um vendedor (e-mail do vendedor). [WSRECEIVE EMAIL — OK]
-  server.registerTool(
-    "protheus_clientes_por_vendedor",
-    {
-      title: "Clientes por vendedor (WSRCLIENTE)",
-      description:
-        "Retorna os clientes vinculados a um vendedor/gerente, identificado pelo e-mail (SA3.A3_EMAIL). O e-mail é do VENDEDOR, não do cliente.",
-      inputSchema: { email: z.string().describe("E-mail do vendedor/gerente (obrigatório).") },
-    },
-    async ({ email }) => toToolResult(await client.get("/WSRCLIENTE", { email, fil: "01" }))
-  );
-
-  // 2. WSRSALDOCLIENTE — saldo em aberto do cliente (títulos SE1). [WSRECEIVE FIL — precisa ADVPL receber CLIENTE]
-  server.registerTool(
-    "protheus_saldo_cliente",
-    {
-      title: "Saldo em aberto do cliente (WSRSALDOCLIENTE)",
-      description:
-        "Saldo em aberto (títulos a receber, SE1) de um cliente. Informe o código do cliente. Empresa/filial fixas em 03/01 no web service.",
-      inputSchema: { cliente: z.string().describe("Código do cliente (E1_CLIENTE) — obrigatório.") },
-    },
-    async ({ cliente }) => toToolResult(await client.get("/WSRSALDOCLIENTE", { cliente, fil: "01" }))
-  );
-
-  // 3. WSRCONTASR — contas a receber por cliente/período. [WSRECEIVE FILIAL — precisa ADVPL]
-  server.registerTool(
-    "protheus_contas_receber",
-    {
-      title: "Contas a receber (WSRCONTASR)",
-      description:
-        "Títulos a receber de um cliente, opcionalmente por período. Informe o código do cliente (e loja). Datas no formato AAAAMMDD.",
-      inputSchema: {
-        codcli: z.string().describe("Código do cliente (obrigatório)."),
-        codloja: z.string().optional().describe("Loja do cliente (opcional)."),
-        datainicio: z.string().optional().describe("Data inicial AAAAMMDD (opcional)."),
-        datafim: z.string().optional().describe("Data final AAAAMMDD (opcional)."),
-      },
-    },
-    async ({ codcli, codloja, datainicio, datafim }) =>
-      toToolResult(
-        await client.get("/WSRCONTASR", {
-          fil: "01",
-          codcli,
-          codloja,
-          dataini: datainicio,
-          datafim,
-        })
-      )
-  );
-
-  // 4. WSRCONSAFES — cliente por CNPJ. [WSRECEIVE CNPJ — OK]
-  server.registerTool(
-    "protheus_cliente_por_cnpj",
-    {
-      title: "Cliente por CNPJ (WSRCONSAFES)",
-      description: "Retorna o(s) cliente(s) no Protheus a partir do CNPJ informado.",
-      inputSchema: { cnpj: z.string().describe("CNPJ do cliente (só números ou formatado) — obrigatório.") },
-    },
-    async ({ cnpj }) => toToolResult(await client.get("/WSRCONSAFES", { cnpj, fil: "01" }))
-  );
-
-  // ===================== PRODUTOS / ESTOQUE =====================
-
-  // 5. WSRB2BPRODUTO — produtos (filial/armazém). [WSRECEIVE FIL — OK p/ FIL]
-  server.registerTool(
-    "protheus_produtos",
-    {
-      title: "Produtos (WSRB2BPRODUTO)",
-      description: "Retorna os produtos do Protheus. Opcionalmente por armazém. (Serviço B2B customizado.)",
-      inputSchema: {
-        armazem: z.string().optional().describe("Código do armazém (opcional)."),
-        operacao: z.string().optional().describe("Operação: LISTA (padrão), ESTOQUE ou PRECO."),
-      },
-    },
-    async ({ armazem, operacao }) =>
-      toToolResult(await client.get("/WSRB2BPRODUTO", { fil: "01", armazem, operacao: operacao || "LISTA" }))
-  );
-
-  // 6. WSRCRMSB2 — saldo em estoque por produto. [WSRECEIVE incorreto — precisa ADVPL]
-  server.registerTool(
-    "protheus_saldo_estoque",
-    {
-      title: "Saldo em estoque (WSRCRMSB2)",
-      description: "Retorna o saldo em estoque dos produtos (SB2). Opcionalmente filtra por produto.",
-      inputSchema: {
-        produto: z.string().optional().describe("Código do produto (opcional)."),
-        operacao: z.string().optional().describe("Operação: LISTA (padrão) ou ESTOQUE."),
-      },
-    },
-    async ({ produto, operacao }) =>
-      toToolResult(await client.get("/WSRCRMSB2", { fil: "01", produto, operacao: operacao || "LISTA" }))
-  );
-
-  // 7. WSRESTRUTURA — estrutura do produto (PAI/REV). [WSRECEIVE FILIAL — precisa ADVPL]
-  server.registerTool(
-    "protheus_estrutura_produto",
-    {
-      title: "Estrutura do produto (WSRESTRUTURA)",
-      description: "Retorna os itens da estrutura (BOM) de um produto pai, para uma revisão.",
-      inputSchema: {
-        pai: z.string().describe("Código do produto pai (obrigatório)."),
-        rev: z.string().optional().describe("Revisão da estrutura (opcional)."),
-      },
-    },
-    async ({ pai, rev }) => toToolResult(await client.get("/WSRESTRUTURA", { fil: "01", pai, rev }))
-  );
-
-  // ===================== COMPRAS =====================
-
-  // 8. WSRESTSC — solicitação de compra por número. [WSRECEIVE RECEIVE — precisa ADVPL]
-  server.registerTool(
-    "protheus_solicitacao_compra",
-    {
-      title: "Solicitação de compra por número (WSRESTSC)",
-      description:
-        "Retorna os dados de uma Solicitação de Compra (SC1) pelo número, com itens e centro de custo.",
-      inputSchema: { numsc: z.string().describe("Número da solicitação de compra (C1_NUM) — obrigatório.") },
-    },
-    async ({ numsc }) => toToolResult(await client.get("/WSRESTSC", { numsc, op: "1", fil: "01" }))
-  );
-
-  // 9. WSRPCABERTO — pedidos de compra em aberto por fornecedor/loja. [WSRECEIVE FILIAL — precisa ADVPL]
-  server.registerTool(
-    "protheus_pedidos_compra_aberto",
-    {
-      title: "Pedidos de compra em aberto (WSRPCABERTO)",
-      description:
-        "Retorna os Pedidos de Compra (SC7) em aberto de um fornecedor+loja, com saldo, armazém e centro de custo.",
-      inputSchema: {
-        fornece: z.string().describe("Código do fornecedor (obrigatório)."),
-        loja: z.string().describe("Loja do fornecedor (obrigatório)."),
-      },
-    },
-    async ({ fornece, loja }) =>
-      toToolResult(await client.get("/WSRPCABERTO", { fornece, loja, filial: "01" }))
-  );
-
-  // 10. WSRFORNECE — fornecedor. [WSRECEIVE FORNECE — OK]
-  server.registerTool(
-    "protheus_fornecedor",
-    {
-      title: "Fornecedor (WSRFORNECE)",
-      description: "Retorna os dados de um fornecedor pelo código.",
-      inputSchema: { fornece: z.string().describe("Código do fornecedor (A2_COD) — obrigatório.") },
-    },
-    async ({ fornece }) => toToolResult(await client.get("/WSRFORNECE", { fornece, fil: "01" }))
-  );
-
-  // ===================== DIAGNÓSTICO (varredura de todos os WS GET) =====================
+  // Diagnóstico — varre todos os WS GET com os parâmetros DEV.
   server.registerTool(
     "protheus_diagnostico",
     {
       title: "Diagnóstico — varre todos os WS GET (DEV)",
-      description:
-        "Percorre todos os web services GET com os parâmetros DEV conhecidos e retorna um resumo compacto por serviço (status: ok/vazio/erro, tamanho, amostra). Uso interno de teste.",
+      description: "Percorre todos os web services GET com os parâmetros DEV e retorna um resumo compacto (ok/vazio/erro). Uso interno de teste.",
       inputSchema: {},
     },
     async () => {
